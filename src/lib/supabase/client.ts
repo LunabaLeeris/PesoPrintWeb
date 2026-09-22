@@ -1,16 +1,9 @@
 import { createBrowserClient } from '@supabase/ssr';
+import { getRequiredEnv } from '@/lib/env';
 
 export function createClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const supabaseUrl = getRequiredEnv('NEXT_PUBLIC_SUPABASE_URL');
+  const supabaseAnonKey = getRequiredEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY');
 
-  if (!supabaseUrl || !supabaseAnonKey) {
-    // If keys aren't configured yet, provide a dummy client warning in dev
-    console.warn('Supabase URL or Anon Key is missing. Please check your .env.local file.');
-  }
-
-  return createBrowserClient(
-    supabaseUrl || 'https://placeholder.supabase.co',
-    supabaseAnonKey || 'placeholder-anon-key'
-  );
+  return createBrowserClient(supabaseUrl, supabaseAnonKey);
 }

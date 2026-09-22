@@ -1,4 +1,5 @@
 export * from './database.types';
+export * from './printer.types';
 
 export interface UserProfile {
   id: string;

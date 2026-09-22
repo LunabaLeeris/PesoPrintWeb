@@ -1,5 +1,7 @@
 import { createClient } from '@/lib/supabase/client';
 import { ServiceResponse } from '@/types';
+export * from './storage-service';
+export * from './printer-service';
 
 export async function checkSupabaseConnection(): Promise<ServiceResponse<{ connected: boolean; message: string }>> {
   try {
