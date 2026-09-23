@@ -99,6 +99,35 @@ export async function releaseKioskSession(
 }
 
 /**
+ * Retrieves a specific kiosk by its ID
+ */
+export async function getKioskById(kioskId: string): Promise<KioskRow | null> {
+  const supabase = createClient();
+  const { data, error } = await supabase
+    .from('kiosks')
+    .select('*')
+    .eq('id', kioskId)
+    .maybeSingle();
+
+  if (error) {
+    console.error('Error fetching kiosk:', error);
+    return null;
+  }
+
+  return data;
+}
+
+/**
+ * Retrieves the printer server tunnel URL for a specific kiosk.
+ * Each kiosk can have a distinct Cloudflare tunnel URL stored in the `tunnel` column.
+ * Falls back to NEXT_PUBLIC_PRINT_SERVER_URL if no tunnel is configured.
+ */
+export async function getKioskPrinterUrl(kioskId: string): Promise<string> {
+  const kiosk = await getKioskById(kioskId);
+  return kiosk?.tunnel || process.env.NEXT_PUBLIC_PRINT_SERVER_URL || '';
+}
+
+/**
  * Saves document metadata into the `documents` table
  */
 export async function saveDocumentRecord(

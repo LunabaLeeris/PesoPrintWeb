@@ -10,6 +10,7 @@ export interface RequiredEnvVars {
   NEXT_PUBLIC_SUPABASE_ANON_KEY: string;
   NEXT_PUBLIC_SUPABASE_STORAGE_BUCKET: string;
   NEXT_PUBLIC_PRINT_SERVER_URL: string;
+  KIOSK_SECRET_KEY?: string;
 }
 
 export interface EnvValidationResult {
@@ -24,7 +25,23 @@ export function getClientEnv(): RequiredEnvVars {
     NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim() || '',
     NEXT_PUBLIC_SUPABASE_STORAGE_BUCKET: process.env.NEXT_PUBLIC_SUPABASE_STORAGE_BUCKET?.trim() || '',
     NEXT_PUBLIC_PRINT_SERVER_URL: process.env.NEXT_PUBLIC_PRINT_SERVER_URL?.trim() || '',
+    KIOSK_SECRET_KEY:
+      process.env.NEXT_PUBLIC_KIOSK_SECRET_KEY?.trim() ||
+      process.env.KIOSK_SECRET_KEY?.trim() ||
+      '',
   };
+}
+
+/**
+ * Returns the Kiosk Secret Key for Pi Express server authentication.
+ * Checks both NEXT_PUBLIC_KIOSK_SECRET_KEY (for client bundles) and KIOSK_SECRET_KEY (server).
+ */
+export function getKioskSecretKey(): string {
+  return (
+    process.env.NEXT_PUBLIC_KIOSK_SECRET_KEY?.trim() ||
+    process.env.KIOSK_SECRET_KEY?.trim() ||
+    ''
+  );
 }
 
 /**

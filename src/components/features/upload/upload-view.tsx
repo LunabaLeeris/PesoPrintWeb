@@ -8,6 +8,7 @@ import { Button } from '@/components/common/button';
 import { setCookie, KIOSK_ID_COOKIE, resolveKioskId } from '@/lib/kiosk';
 import { uploadPrintDocument } from '@/services/storage-service';
 import { saveDocumentRecord } from '@/services/kiosk-service';
+import { checkKioskPrinterHealth } from '@/services/printer-service';
 
 export type UploadViewState = 'idle' | 'uploading' | 'error';
 
@@ -58,6 +59,18 @@ export const UploadView: React.FC<UploadViewProps> = ({
     try {
       if (!activeKioskId) {
         throw new Error('Kiosk session not found. Please scan the QR code again.');
+      }
+
+      // Pre-flight check: Verify Raspberry Pi print server is healthy before uploading
+      setStatusMessage('Checking printer connection...');
+      const health = await checkKioskPrinterHealth(activeKioskId);
+      if (!health.isHealthy) {
+        router.push(
+          `/kiosk/${activeKioskId}/offline?message=${encodeURIComponent(
+            health.message || 'Printer is currently offline or unreachable.'
+          )}`
+        );
+        return;
       }
 
       // Progress animation simulation while uploading

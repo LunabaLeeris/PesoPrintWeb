@@ -19,18 +19,21 @@ export interface Database {
         Row: {
           id: string;
           session: string | null;
+          tunnel: string | null;
           date_updated: string;
           created_at: string;
         };
         Insert: {
           id?: string;
           session?: string | null;
+          tunnel?: string | null;
           date_updated?: string;
           created_at?: string;
         };
         Update: {
           id?: string;
           session?: string | null;
+          tunnel?: string | null;
           date_updated?: string;
           created_at?: string;
         };

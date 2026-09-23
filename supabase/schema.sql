@@ -14,6 +14,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE TABLE IF NOT EXISTS public.kiosks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session TEXT, -- IP address or session token of the user currently using the kiosk
+    tunnel TEXT, -- Cloudflare tunnel or local network URL for the kiosk's printer
     date_updated TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
 );

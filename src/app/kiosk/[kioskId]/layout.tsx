@@ -1,6 +1,6 @@
 import React from 'react';
 import { verifyKioskAccess } from '@/lib/kiosk-guard';
-import { KioskBusyView } from '@/components/features/kiosk';
+import { KioskBusyView, KioskOfflineView } from '@/components/features/kiosk';
 
 interface KioskLayoutProps {
   children: React.ReactNode;
@@ -17,14 +17,18 @@ interface KioskLayoutProps {
  * 
  * Checks if the kiosk exists in the Supabase database. If not, throws notFound().
  * Checks if the kiosk has an active session from another user. If so, renders KioskBusyView.
- * Individual child pages do not need to repeat any kiosk checking logic!
+ * Checks if the kiosk's Raspberry Pi print server is healthy via its tunnel. If not, renders KioskOfflineView.
  */
 export default async function KioskLayout({ children, params }: KioskLayoutProps) {
   const { kioskId } = await params;
-  const { isBusy } = await verifyKioskAccess(kioskId);
+  const { isBusy, isHealthy, healthError } = await verifyKioskAccess(kioskId);
 
   if (isBusy) {
     return <KioskBusyView />;
+  }
+
+  if (!isHealthy) {
+    return <KioskOfflineView message={healthError} />;
   }
 
   return <>{children}</>;

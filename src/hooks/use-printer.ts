@@ -5,8 +5,10 @@ import { PrintStage, PrintLogEntry, PrintProgressEvent } from '@/types';
 import { uploadPrintDocument } from '@/services/storage-service';
 import { streamPrintJob, pingServer, invokeEndpoint } from '@/services/printer-service';
 import { validateEnvironment } from '@/lib/env';
+import { createClient } from '@/lib/supabase/client';
+import { resolveKioskId } from '@/lib/kiosk';
 
-export function usePrinter() {
+export function usePrinter(kioskId?: string) {
   const envValidation = validateEnvironment();
   const envStatus = {
     isValid: envValidation.isValid,
@@ -31,17 +33,47 @@ export function usePrinter() {
 
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Load persisted serverUrl from localStorage if available
+  // Dynamically load the kiosk-specific tunnel URL from Supabase
+  useEffect(() => {
+    let isCancelled = false;
+
+    async function fetchKioskTunnel() {
+      const activeKioskId = kioskId || resolveKioskId();
+      if (!activeKioskId) return;
+
+      try {
+        const supabase = createClient();
+        const { data } = await supabase
+          .from('kiosks')
+          .select('tunnel')
+          .eq('id', activeKioskId)
+          .maybeSingle();
+
+        if (!isCancelled && data?.tunnel) {
+          setServerUrlState(data.tunnel);
+        }
+      } catch (err) {
+        console.warn('Could not fetch kiosk tunnel:', err);
+      }
+    }
+
+    fetchKioskTunnel();
+    return () => {
+      isCancelled = true;
+    };
+  }, [kioskId]);
+
+  // Load persisted serverUrl from localStorage if available (when not overridden by kiosk tunnel)
   useEffect(() => {
     try {
       const saved = localStorage.getItem('pesoprint_server_url');
-      if (saved) {
+      if (saved && !kioskId) {
         setServerUrlState(saved);
       }
     } catch {
       // ignore storage error
     }
-  }, []);
+  }, [kioskId]);
 
   const setServerUrl = (url: string) => {
     setServerUrlState(url);
