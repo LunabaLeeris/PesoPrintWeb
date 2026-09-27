@@ -3,7 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { PrintStage, PrintLogEntry, PrintProgressEvent } from '@/types';
 import { uploadPrintDocument } from '@/services/storage-service';
-import { streamPrintJob, pingServer, invokeEndpoint } from '@/services/printer-service';
+import { streamPrintJob, pingServer, invokeEndpoint, resolvePrinterUrl } from '@/services/printer-service';
 import { validateEnvironment } from '@/lib/env';
 import { createClient } from '@/lib/supabase/client';
 import { resolveKioskId } from '@/lib/kiosk';
@@ -157,15 +157,29 @@ export function usePrinter(kioskId?: string) {
    * Core execution of Pi SSE stream
    */
   const executePrintUrl = async (fileUrl: string, copies: number) => {
+    let targetServer = serverUrl;
+    if (!targetServer && kioskId) {
+      targetServer = await resolvePrinterUrl(kioskId);
+      setServerUrlState(targetServer);
+    }
+
+    if (!targetServer) {
+      setIsPrinting(false);
+      setStage('error');
+      setStatusMessage('No print server or tunnel URL found for this kiosk.');
+      addLog('No print server or tunnel URL configured for this kiosk.', 'error', 'connect');
+      return;
+    }
+
     setStage('downloading');
     setProgress(25);
     setStatusMessage('Connecting to Raspberry Pi print server...');
-    addLog(`Sending job to Pi (${serverUrl}/api/print-url) with ${copies} copy(ies)...`, 'info', 'connect');
+    addLog(`Sending job to Pi (${targetServer}/api/print-url) with ${copies} copy(ies)...`, 'info', 'connect');
 
     abortControllerRef.current = new AbortController();
 
     await streamPrintJob(
-      serverUrl,
+      targetServer,
       { fileUrl, copies },
       {
         onEvent: (event: PrintProgressEvent) => {

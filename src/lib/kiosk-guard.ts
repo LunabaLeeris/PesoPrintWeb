@@ -4,6 +4,7 @@ import { createClient } from '@/lib/supabase/server';
 import { KioskRow } from '@/types';
 import { KIOSK_ID_COOKIE, KIOSK_SESSION_COOKIE, UUID_REGEX } from '@/lib/kiosk';
 import { checkKioskPrinterHealth } from '@/services/printer-service';
+import { isHealthCheckDisabled } from '@/lib/env';
 
 export interface KioskGuardResult {
   kiosk: KioskRow;
@@ -50,12 +51,14 @@ export async function verifyKioskAccess(kioskId?: string): Promise<KioskGuardRes
   let isHealthy = true;
   let healthError: string | undefined;
 
-  const printerTarget = kiosk.tunnel || process.env.NEXT_PUBLIC_PRINT_SERVER_URL;
-  if (printerTarget) {
-    const healthResult = await checkKioskPrinterHealth(printerTarget);
-    isHealthy = healthResult.isHealthy;
-    if (!healthResult.isHealthy) {
-      healthError = healthResult.message;
+  if (!isHealthCheckDisabled()) {
+    const printerTarget = kiosk.tunnel || process.env.NEXT_PUBLIC_PRINT_SERVER_URL;
+    if (printerTarget) {
+      const healthResult = await checkKioskPrinterHealth(printerTarget);
+      isHealthy = healthResult.isHealthy;
+      if (!healthResult.isHealthy) {
+        healthError = healthResult.message;
+      }
     }
   }
 

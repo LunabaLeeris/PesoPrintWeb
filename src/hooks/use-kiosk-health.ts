@@ -15,6 +15,7 @@ export interface UseKioskHealthReturn {
 /**
  * React hook that monitors Raspberry Pi print server health for a kiosk.
  * - Runs health check on mount.
+ * 
  * - Automatically re-verifies when the browser window gains focus or document becomes visible.
  * - Provides an imperative checkHealth() method for pre-flight validation before actions (fetches, uploads, prints).
  */

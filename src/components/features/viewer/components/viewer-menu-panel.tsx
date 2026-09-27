@@ -4,13 +4,22 @@ import React, { useState, useEffect } from 'react';
 import Image from 'next/image';
 import { ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { ModalPanel } from '@/components/common/modal-panel';
+import { Button } from '@/components/common/button';
+
+export interface PrintOptions {
+  paperSize: string;
+  orientation: string;
+  colorScheme: string;
+}
 
 export interface ViewerMenuPanelProps {
   isOpen: boolean;
   onClose: () => void;
   onOrganizePages?: () => void;
   onCancelClick?: () => void;
-  onPrint?: () => void;
+  onPrint?: (options?: PrintOptions) => void;
+  totalPages?: number;
   paperSize?: string;
   onPaperSizeChange?: (size: string) => void;
   orientation?: string;
@@ -30,6 +39,7 @@ export const ViewerMenuPanel: React.FC<ViewerMenuPanelProps> = ({
   onOrganizePages,
   onCancelClick,
   onPrint,
+  totalPages = 1,
   paperSize: controlledPaperSize,
   onPaperSizeChange,
   orientation: controlledOrientation,
@@ -42,6 +52,7 @@ export const ViewerMenuPanel: React.FC<ViewerMenuPanelProps> = ({
   const [localPaperSize, setLocalPaperSize] = useState('A4');
   const [localOrientation, setLocalOrientation] = useState('Portrait');
   const [localColorScheme, setLocalColorScheme] = useState('B&W');
+  const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
 
   const currentPaperSize = controlledPaperSize ?? localPaperSize;
   const currentOrientation = controlledOrientation ?? localOrientation;
@@ -60,6 +71,24 @@ export const ViewerMenuPanel: React.FC<ViewerMenuPanelProps> = ({
   const handleColorSchemeChange = (val: string) => {
     setLocalColorScheme(val);
     onColorSchemeChange?.(val);
+  };
+
+  const handlePrintClick = () => {
+    onClose();
+    setIsConfirmModalOpen(true);
+  };
+
+  const handleConfirmPrint = () => {
+    setIsConfirmModalOpen(false);
+    onPrint?.({
+      paperSize: currentPaperSize,
+      orientation: currentOrientation,
+      colorScheme: currentColorScheme,
+    });
+  };
+
+  const handleCloseConfirm = () => {
+    setIsConfirmModalOpen(false);
   };
 
   // Close on Escape key press
@@ -264,7 +293,7 @@ export const ViewerMenuPanel: React.FC<ViewerMenuPanelProps> = ({
           <div className="mt-7">
             <button
               type="button"
-              onClick={onPrint}
+              onClick={handlePrintClick}
               className={cn(
                 'w-full bg-[#FDD41F] hover:bg-[#FCD20A] active:scale-[0.98]',
                 'text-[#2A2F3D] font-bold text-[17px] sm:text-[18px] py-3.5 sm:py-4 rounded-[16px]',
@@ -284,6 +313,53 @@ export const ViewerMenuPanel: React.FC<ViewerMenuPanelProps> = ({
           </p>
         </footer>
       </aside>
+
+      {/* Print Confirmation Modal using ModalPanel */}
+      <ModalPanel
+        isOpen={isConfirmModalOpen}
+        onClose={handleCloseConfirm}
+      >
+        <ModalPanel.Icon
+          src="printing.svg"
+          alt="Proceed with printing"
+          width={180}
+          height={145}
+          className="w-40 sm:w-44 h-32 sm:h-36 mb-3"
+        />
+
+        <ModalPanel.Title className="mb-3.5 text-[19px] sm:text-[21px]">
+          Proceed with printing?
+        </ModalPanel.Title>
+
+        <ModalPanel.Details>
+          <ModalPanel.DetailItem label="Total Pages" value={totalPages} />
+          <ModalPanel.DetailItem label="Paper Size" value={currentPaperSize} />
+          <ModalPanel.DetailItem label="Orientation" value={currentOrientation} />
+          <ModalPanel.DetailItem label="Color Scheme" value={currentColorScheme} />
+        </ModalPanel.Details>
+
+        <ModalPanel.Actions className="mt-0">
+          <Button
+            variant="primary"
+            size="lg"
+            fullWidth
+            onClick={handleCloseConfirm}
+            className="py-3.5 text-[16px] rounded-[16px]"
+          >
+            Back
+          </Button>
+
+          <Button
+            variant="secondary"
+            size="lg"
+            fullWidth
+            onClick={handleConfirmPrint}
+            className="py-3.5 text-[16px] rounded-[16px]"
+          >
+            Print
+          </Button>
+        </ModalPanel.Actions>
+      </ModalPanel>
     </>
   );
 };

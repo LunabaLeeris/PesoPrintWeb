@@ -1,16 +1,21 @@
 import React from 'react';
 import Image from 'next/image';
+import { AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export interface NavBarProps extends React.HTMLAttributes<HTMLElement> {
   onLogoClick?: () => void;
   onQuestionClick?: () => void;
+  showAlertButton?: boolean;
+  onAlertClick?: () => void;
   className?: string;
 }
 
 export const NavBar: React.FC<NavBarProps> = ({
   onLogoClick,
   onQuestionClick,
+  showAlertButton = false,
+  onAlertClick,
   className,
   ...props
 }) => {
@@ -48,27 +53,45 @@ export const NavBar: React.FC<NavBarProps> = ({
         />
       </div>
 
-      {/* Right Ellipse Panel (Question / Help Button) */}
-      <button
-        type="button"
-        onClick={onQuestionClick}
-        aria-label="Ask Question or Help"
-        className={cn(
-          'w-[54px] h-[54px] rounded-full bg-white border border-[#E9E9ED]',
-          'flex items-center justify-center p-2 shadow-[0_2px_8px_rgba(0,0,0,0.05)]',
-          'hover:bg-[#FAFAFA] active:scale-95 transition-all duration-150 cursor-pointer',
-          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#34418E]'
+      {/* Right Ellipse Panel (Alert Button & Question / Help Button) */}
+      <div className="flex items-center gap-3">
+        {(showAlertButton || onAlertClick) && (
+          <button
+            type="button"
+            onClick={onAlertClick}
+            aria-label="Alert"
+            className={cn(
+              'w-[54px] h-[54px] rounded-full bg-[#C92A2A] text-white',
+              'flex items-center justify-center shadow-[0_2px_8px_rgba(201,42,42,0.25)]',
+              'hover:bg-[#B02525] active:scale-95 transition-all duration-150 cursor-pointer',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C92A2A]'
+            )}
+          >
+            <AlertCircle className="w-7 h-7 stroke-[2.2]" />
+          </button>
         )}
-      >
-        <Image
-          src="/illustrations/questions.svg"
-          alt="Questions / Help"
-          width={36}
-          height={30}
-          className="w-auto h-auto max-w-[34px] max-h-[28px] object-contain pointer-events-none"
-          priority
-        />
-      </button>
+
+        <button
+          type="button"
+          onClick={onQuestionClick}
+          aria-label="Ask Question or Help"
+          className={cn(
+            'w-[54px] h-[54px] rounded-full bg-white border border-[#E9E9ED]',
+            'flex items-center justify-center p-2 shadow-[0_2px_8px_rgba(0,0,0,0.05)]',
+            'hover:bg-[#FAFAFA] active:scale-95 transition-all duration-150 cursor-pointer',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#34418E]'
+          )}
+        >
+          <Image
+            src="/illustrations/questions.svg"
+            alt="Questions / Help"
+            width={36}
+            height={30}
+            className="w-auto h-auto max-w-[34px] max-h-[28px] object-contain pointer-events-none"
+            priority
+          />
+        </button>
+      </div>
       </div>
     </header>
   );

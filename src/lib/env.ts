@@ -45,6 +45,30 @@ export function getKioskSecretKey(): string {
 }
 
 /**
+ * Checks whether printer health checks are globally disabled via environment variable.
+ * When DISABLE_HEALTH_CHECKS=true (or NEXT_PUBLIC_DISABLE_HEALTH_CHECKS=true),
+ * health checks will return healthy/ok immediately without querying the printer server or tunnel.
+ */
+export function isHealthCheckDisabled(): boolean {
+  return (
+    process.env.DISABLE_HEALTH_CHECKS === 'true' ||
+    process.env.NEXT_PUBLIC_DISABLE_HEALTH_CHECKS === 'true'
+  );
+}
+
+/**
+ * Checks whether payments are globally bypassed/mocked via environment variable.
+ * When DISABLE_PAYMENT=true (or NEXT_PUBLIC_DISABLE_PAYMENT=true),
+ * tapping on the payment icons immediately triggers payment success.
+ */
+export function isPaymentDisabled(): boolean {
+  return (
+    process.env.DISABLE_PAYMENT === 'true' ||
+    process.env.NEXT_PUBLIC_DISABLE_PAYMENT === 'true'
+  );
+}
+
+/**
  * Validates all required environment variables at runtime on both server and client.
  */
 export function validateEnvironment(): EnvValidationResult {

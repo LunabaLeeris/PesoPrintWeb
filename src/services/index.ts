@@ -3,6 +3,7 @@ import { ServiceResponse } from '@/types';
 export * from './storage-service';
 export * from './printer-service';
 export * from './kiosk-service';
+export * from './cost-service';
 
 export async function checkSupabaseConnection(): Promise<ServiceResponse<{ connected: boolean; message: string }>> {
   try {

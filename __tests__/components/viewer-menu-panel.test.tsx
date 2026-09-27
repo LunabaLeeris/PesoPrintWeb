@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import {
   ViewerMenuPanel,
   PAPER_SIZE_OPTIONS,
@@ -92,13 +92,49 @@ describe('ViewerMenuPanel', () => {
     expect(defaultProps.onOrganizePages).toHaveBeenCalledTimes(1);
   });
 
-  it('calls onPrint when Print button is clicked', () => {
-    render(<ViewerMenuPanel {...defaultProps} />);
+  it('opens confirmation modal when Print button is clicked and calls onPrint upon confirmation', () => {
+    render(<ViewerMenuPanel {...defaultProps} totalPages={34} />);
 
-    const printBtn = screen.getByRole('button', { name: /^print$/i });
-    fireEvent.click(printBtn);
+    // Click Print button on panel
+    const panelPrintBtn = screen.getByRole('button', { name: /^print$/i });
+    fireEvent.click(panelPrintBtn);
+
+    // Panel onClose should be called to slide menu away
+    expect(defaultProps.onClose).toHaveBeenCalled();
+
+    // Confirmation modal should be visible
+    const modal = screen.getByRole('dialog');
+    expect(within(modal).getByRole('heading', { name: /proceed with printing\?/i })).toBeInTheDocument();
+    expect(within(modal).getByText(/34/)).toBeInTheDocument();
+    expect(within(modal).getByText('A4')).toBeInTheDocument();
+    expect(within(modal).getByText('Portrait')).toBeInTheDocument();
+    expect(within(modal).getByText('B&W')).toBeInTheDocument();
+
+    // Confirm print in modal
+    const confirmPrintBtn = Array.from(modal.querySelectorAll('button')).find(
+      (btn) => btn.textContent?.trim() === 'Print'
+    );
+    expect(confirmPrintBtn).toBeTruthy();
+    if (confirmPrintBtn) {
+      fireEvent.click(confirmPrintBtn);
+    }
 
     expect(defaultProps.onPrint).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes confirmation modal without calling onPrint when Back button is clicked', () => {
+    render(<ViewerMenuPanel {...defaultProps} />);
+
+    const panelPrintBtn = screen.getByRole('button', { name: /^print$/i });
+    fireEvent.click(panelPrintBtn);
+
+    expect(screen.getByRole('heading', { name: /proceed with printing\?/i })).toBeInTheDocument();
+
+    const backBtn = screen.getByRole('button', { name: /^back$/i });
+    fireEvent.click(backBtn);
+
+    expect(screen.queryByRole('heading', { name: /proceed with printing\?/i })).not.toBeInTheDocument();
+    expect(defaultProps.onPrint).not.toHaveBeenCalled();
   });
 
   it('handles dropdown option changes', () => {

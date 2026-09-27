@@ -1,7 +1,7 @@
 import { PrintProgressEvent, PrintRequest } from '@/types';
-import { getKioskSecretKey } from '@/lib/env';
+import { getKioskSecretKey, isHealthCheckDisabled } from '@/lib/env';
 
-export { getKioskSecretKey };
+export { getKioskSecretKey, isHealthCheckDisabled };
 
 export interface StreamCallbacks {
   onEvent: (event: PrintProgressEvent) => void;
@@ -77,6 +77,17 @@ export async function checkKioskPrinterHealth(
   secretKey?: string,
   timeoutMs: number = 3500
 ): Promise<KioskHealthResult> {
+  if (isHealthCheckDisabled()) {
+    return {
+      isHealthy: true,
+      status: 200,
+      message: 'Health checks disabled via DISABLE_HEALTH_CHECKS.',
+      printer: 'Virtual Mock Printer (Health checks disabled)',
+      uptime: 999999,
+      latencyMs: 0,
+    };
+  }
+
   const startTime = Date.now();
   const serverUrl = await resolvePrinterUrl(kioskIdOrUrl);
 
@@ -271,6 +282,15 @@ export async function pingServer(
   serverUrl: string,
   secretKey?: string
 ): Promise<{ ok: boolean; message: string; latencyMs: number; data?: unknown }> {
+  if (isHealthCheckDisabled()) {
+    return {
+      ok: true,
+      message: 'Health checks disabled via DISABLE_HEALTH_CHECKS.',
+      latencyMs: 0,
+      data: { status: 'ok', bypassed: true },
+    };
+  }
+
   const base = normalizeServerUrl(serverUrl);
   const startTime = Date.now();
   const key = secretKey || getKioskSecretKey();

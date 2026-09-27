@@ -10,13 +10,21 @@ import { updateDocumentPrintOptions, deleteDocumentRecord } from '@/services/kio
 import { deletePrintDocument } from '@/services/storage-service';
 import { resolveKioskId } from '@/lib/kiosk';
 import {
-  CancelConfirmModal,
   CopyStepper,
   PageIndicator,
   PageThumbnailCard,
   SideActionButton,
   ViewerMenuPanel,
+  PrintStreamModal,
+  AnalyzingCostView,
+  PrintOptions,
 } from './components';
+import {
+  analyzePdfPageCoverage,
+  requestDocumentCostCalculation,
+  PageCostCalculationInput,
+} from '@/services/cost-service';
+import { usePrinter } from '@/hooks/use-printer';
 import { ChevronLeft, ChevronRight, Check, Loader2, ZoomIn, ZoomOut, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -50,6 +58,13 @@ export interface DocumentViewerProps {
   file?: File | null;
   onBack?: () => void;
   onHelpClick?: () => void;
+  initialViewMode?: 'single' | 'list';
+  hideMenu?: boolean;
+  hideMaximize?: boolean;
+  hideCopyStepper?: boolean;
+  hideZoom?: boolean;
+  onCancelClick?: () => void;
+  children?: React.ReactNode;
 }
 
 export const DocumentViewer: React.FC<DocumentViewerProps> = ({
@@ -59,6 +74,13 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
   file,
   onBack,
   onHelpClick,
+  initialViewMode = 'single',
+  hideMenu = false,
+  hideMaximize = false,
+  hideCopyStepper = false,
+  hideZoom = false,
+  onCancelClick,
+  children,
 }) => {
   const router = useRouter();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -77,7 +99,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
   const [isMenuOpen, setIsMenuOpen] = useState<boolean>(false);
   const [isCancelModalOpen, setIsCancelModalOpen] = useState<boolean>(false);
   const [isDeletingDocument, setIsDeletingDocument] = useState<boolean>(false);
-  const [viewMode, setViewMode] = useState<'single' | 'list'>('single');
+  const [viewMode, setViewMode] = useState<'single' | 'list'>(initialViewMode);
   const [isMaximized, setIsMaximized] = useState<boolean>(false);
 
   // Map of page number -> copy count
@@ -133,6 +155,113 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
       }
     };
   }, [file, pdfUrl]);
+
+  // Real-time Raspberry Pi Print Job Stream State
+  const printer = usePrinter(activeKioskId);
+  const [isPrintModalOpen, setIsPrintModalOpen] = useState<boolean>(false);
+
+  // Print Cost Analysis State
+  const [isAnalyzingCost, setIsAnalyzingCost] = useState<boolean>(false);
+  const [analysisProgress, setAnalysisProgress] = useState<number>(0);
+  const [analysisStatusText, setAnalysisStatusText] = useState<string>('reading rgb distribution...');
+  const isAnalysisCancelledRef = useRef<boolean>(false);
+
+  const handleStartCostAnalysis = async (options?: PrintOptions) => {
+    const selectedOptions = options || {
+      paperSize: 'A4',
+      orientation: 'Portrait',
+      colorScheme: 'B&W',
+    };
+
+    setIsMenuOpen(false);
+    setIsAnalyzingCost(true);
+    setAnalysisProgress(0);
+    setAnalysisStatusText('reading rgb distribution...');
+    isAnalysisCancelledRef.current = false;
+
+    try {
+      const pageMetrics: PageCostCalculationInput[] = [];
+      const totalToAnalyze = Math.max(1, totalPages);
+
+      for (let p = 1; p <= totalToAnalyze; p++) {
+        if (isAnalysisCancelledRef.current) return;
+
+        const currentProgress = Math.round(((p - 1) / totalToAnalyze) * 85);
+        setAnalysisProgress(currentProgress);
+        setAnalysisStatusText(
+          totalToAnalyze > 1
+            ? `reading rgb distribution (page ${p} of ${totalToAnalyze})...`
+            : 'reading rgb distribution...'
+        );
+
+        // Short yield for smooth animation
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        if (isAnalysisCancelledRef.current) return;
+
+        const coverage = await analyzePdfPageCoverage(pdfDoc, p);
+        if (isAnalysisCancelledRef.current) return;
+
+        pageMetrics.push({
+          pageNumber: p,
+          copies: pageCopies[p] ?? 1,
+          blackPpc: coverage.blackPpc,
+          colorPpc: coverage.colorPpc,
+        });
+      }
+
+      setAnalysisProgress(90);
+      setAnalysisStatusText('calculating document cost...');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (isAnalysisCancelledRef.current) return;
+
+      const costSummary = await requestDocumentCostCalculation(activeDocId, {
+        pages: pageMetrics,
+        colorScheme: selectedOptions.colorScheme,
+        profit: 2,
+        kioskId: activeKioskId,
+      });
+
+      if (isAnalysisCancelledRef.current) return;
+
+      setAnalysisProgress(100);
+      setAnalysisStatusText('cost calculation complete');
+
+      try {
+        if (typeof window !== 'undefined') {
+          sessionStorage.setItem(`cost_summary_${activeDocId}`, JSON.stringify(costSummary));
+        }
+      } catch {
+        // Ignore sessionStorage write errors
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      if (isAnalysisCancelledRef.current) return;
+
+      const targetUrl = `/kiosk/${activeKioskId}/document_viewer/${activeDocId}/payment?cost=${costSummary.totalCost}&pages=${costSummary.totalPages}&copies=${costSummary.totalCopies}&scheme=${encodeURIComponent(selectedOptions.colorScheme)}&paper=${encodeURIComponent(selectedOptions.paperSize)}`;
+      router.push(targetUrl);
+    } catch (err) {
+      console.error('Cost calculation error:', err);
+      if (!isAnalysisCancelledRef.current) {
+        setIsAnalyzingCost(false);
+        alert('An error occurred while calculating print cost. Please try again.');
+      }
+    }
+  };
+
+  const handleCancelAnalysis = () => {
+    isAnalysisCancelledRef.current = true;
+    setIsAnalyzingCost(false);
+  };
+
+  const handlePrint = async () => {
+    setIsMenuOpen(false);
+    if (!pdfUrl) {
+      alert('Document URL not found.');
+      return;
+    }
+    setIsPrintModalOpen(true);
+    await printer.printUrl(pdfUrl, 1);
+  };
 
   // PDF Document State from PDF.js
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -280,8 +409,14 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
               const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
               const baseViewport = pageObj.getViewport({ scale: 1.0 });
               const screenWidth = typeof window !== 'undefined' ? window.innerWidth : 380;
-              const targetWidth = Math.max(260, Math.min(screenWidth - 48, 360));
-              const fitScale = (targetWidth / baseViewport.width) * dpr;
+              const screenHeight = typeof window !== 'undefined' ? window.innerHeight : 700;
+              const maxAvailableHeight = isMaximized
+                ? Math.max(320, screenHeight - 80)
+                : Math.max(220, screenHeight - (hideCopyStepper ? 300 : 270));
+              const targetWidth = Math.max(220, Math.min(screenWidth - 48, 340));
+              const widthScale = targetWidth / baseViewport.width;
+              const heightScale = maxAvailableHeight / baseViewport.height;
+              const fitScale = Math.min(widthScale, heightScale) * dpr;
               const viewport = pageObj.getViewport({ scale: fitScale });
 
               const offscreen = document.createElement('canvas');
@@ -388,8 +523,14 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
 
         // Calculate responsive scale to fit viewport width
         const screenWidth = typeof window !== 'undefined' ? window.innerWidth : 380;
-        const targetWidth = Math.max(260, Math.min(screenWidth - 48, 360));
-        const fitScale = (targetWidth / baseViewport.width) * dpr;
+        const screenHeight = typeof window !== 'undefined' ? window.innerHeight : 700;
+        const maxAvailableHeight = isMaximized
+          ? Math.max(320, screenHeight - 80)
+          : Math.max(220, screenHeight - (hideCopyStepper ? 300 : 270));
+        const targetWidth = Math.max(220, Math.min(screenWidth - 48, 340));
+        const widthScale = targetWidth / baseViewport.width;
+        const heightScale = maxAvailableHeight / baseViewport.height;
+        const fitScale = Math.min(widthScale, heightScale) * dpr;
 
         const viewport = page.getViewport({ scale: fitScale });
         const ctx = canvas.getContext('2d');
@@ -744,7 +885,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
   // Render Error View when there is no PDF file or loading failed
   if (pdfError) {
     return (
-      <main className="relative min-h-screen w-full bg-[#E6E6E6] flex flex-col items-center justify-between overflow-hidden select-none">
+      <main className="relative h-screen h-[100dvh] max-h-screen w-full bg-[#E6E6E6] flex flex-col items-center justify-between overflow-hidden select-none">
         {/* Background Grid Pattern */}
         <div
           className="absolute inset-0 pointer-events-none z-0 flex items-center justify-center overflow-hidden"
@@ -796,6 +937,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
             Peso Print - 2026
           </p>
         </footer>
+        {children}
       </main>
     );
   }
@@ -803,7 +945,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
   // Render Loading View while PDF is being fetched and parsed
   if (isLoadingPdf) {
     return (
-      <main className="relative min-h-screen w-full bg-[#E6E6E6] flex flex-col items-center justify-between overflow-hidden select-none">
+      <main className="relative h-screen h-[100dvh] max-h-screen w-full bg-[#E6E6E6] flex flex-col items-center justify-between overflow-hidden select-none">
         {/* Background Grid Pattern */}
         <div
           className="absolute inset-0 pointer-events-none z-0 flex items-center justify-center overflow-hidden"
@@ -837,6 +979,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
             Peso Print - 2026
           </p>
         </footer>
+        {children}
       </main>
     );
   }
@@ -844,7 +987,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
   const currentCopies = pageCopies[currentPage] ?? 1;
 
   return (
-    <main className="relative min-h-screen w-full bg-[#E6E6E6] flex flex-col items-center justify-between overflow-hidden select-none">
+    <main className="relative h-screen h-[100dvh] max-h-screen w-full bg-[#E6E6E6] flex flex-col items-center overflow-hidden select-none">
       {/* Background Grid Pattern */}
       <div
         className="absolute inset-0 pointer-events-none z-0 flex items-center justify-center overflow-hidden"
@@ -859,8 +1002,10 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
         />
       </div>
 
-      {/* Top Header Navbar */}
-      <NavBar onLogoClick={handleBackToKiosk} onQuestionClick={handleQuestion} />
+      {/* Top Header Navbar - Fixed at the top, never scrolls */}
+      <div className="w-full shrink-0 z-20">
+        <NavBar onLogoClick={handleBackToKiosk} onQuestionClick={handleQuestion} />
+      </div>
 
       {/* Screen Side Action Buttons (sticking to screen edges for easy single-hand access) */}
       {/* 1. Red Cancel Button (left side, y=170px) */}
@@ -875,7 +1020,13 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
           textColor="#FFFFFF"
           className="shadow-[2px_4px_18px_rgba(220,38,38,0.35)] hover:bg-[#B91C1C]"
           ariaLabel="Cancel printing session"
-          onClick={() => setIsCancelModalOpen(true)}
+          onClick={() => {
+            if (onCancelClick) {
+              onCancelClick();
+            } else {
+              setIsCancelModalOpen(true);
+            }
+          }}
         />
       )}
 
@@ -891,6 +1042,9 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
             setViewMode((prev) => {
               const next = prev === 'list' ? 'single' : 'list';
               if (next === 'list') setIsMaximized(false);
+              if (typeof window !== 'undefined') {
+                window.scrollTo(0, 0);
+              }
               return next;
             });
           }}
@@ -898,7 +1052,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
       )}
 
       {/* 3. Maximize / Minimize Button (left side, moved downward to y=302px, single page view only) */}
-      {viewMode === 'single' && (
+      {!hideMaximize && viewMode === 'single' && (
         <SideActionButton
           side="left"
           y="470px"
@@ -909,7 +1063,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
         />
       )}
 
-      {!isMaximized && (
+      {!hideMenu && !isMaximized && (
         <SideActionButton
           side="right"
           y="170px"
@@ -931,22 +1085,101 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
           setIsMaximized(false);
           setViewMode('list');
         }}
+        totalPages={totalPages}
+        onPrint={handleStartCostAnalysis}
       />
 
-      {/* Cancel Printing Confirmation Modal */}
-      <CancelConfirmModal
+      {/* Cost Analysis Loading View matching reference design */}
+      {isAnalyzingCost && (
+        <AnalyzingCostView
+          progress={analysisProgress}
+          statusText={analysisStatusText}
+          onCancel={handleCancelAnalysis}
+          onLogoClick={handleBackToKiosk}
+        />
+      )}
+
+      {/* Cancel Printing Confirmation Modal using ModalPanel */}
+      <ModalPanel
         isOpen={isCancelModalOpen}
         onClose={() => {
           if (!isDeletingDocument) {
             setIsCancelModalOpen(false);
           }
         }}
-        onConfirm={handleConfirmCancel}
-        isDeleting={isDeletingDocument}
+        closeOnBackdropClick={!isDeletingDocument}
+        closeOnEscape={!isDeletingDocument}
+        backdropTestId="cancel-modal-backdrop"
+        ariaLabelledBy="cancel-modal-title"
+        ariaDescribedBy="cancel-modal-description"
+        className="max-w-[340px] sm:max-w-[360px]"
+      >
+        <ModalPanel.Icon
+          src="/illustrations/confirmation.svg"
+          alt="Cancel Confirmation"
+          width={110}
+          height={145}
+          className="w-28 h-36 mb-2"
+        />
+
+        <ModalPanel.Title id="cancel-modal-title">
+          Cancel printing?
+        </ModalPanel.Title>
+
+        <ModalPanel.Description id="cancel-modal-description" className="mb-6 max-w-[270px]">
+          Are you sure you want to cancel your printing session? All details will be deleted permanently!
+        </ModalPanel.Description>
+
+        <ModalPanel.Actions className="mt-0">
+          <Button
+            variant="primary"
+            size="lg"
+            fullWidth
+            disabled={isDeletingDocument}
+            onClick={() => {
+              if (!isDeletingDocument) {
+                setIsCancelModalOpen(false);
+              }
+            }}
+            className="py-3.5 text-[16px] rounded-[16px]"
+          >
+            No
+          </Button>
+
+          <Button
+            variant="secondary"
+            size="lg"
+            fullWidth
+            isLoading={isDeletingDocument}
+            disabled={isDeletingDocument}
+            onClick={handleConfirmCancel}
+            className="py-3.5 text-[16px] rounded-[16px]"
+          >
+            Cancel
+          </Button>
+        </ModalPanel.Actions>
+      </ModalPanel>
+
+      {/* Real-time Raspberry Pi Print Job Streaming Modal */}
+      <PrintStreamModal
+        isOpen={isPrintModalOpen}
+        onClose={() => setIsPrintModalOpen(false)}
+        stage={printer.stage}
+        progress={printer.progress}
+        statusMessage={printer.statusMessage}
+        logs={printer.logs}
+        isPrinting={printer.isPrinting}
+        onCancel={printer.cancelPrint}
+        onRetry={() => {
+          if (pdfUrl) {
+            printer.printUrl(pdfUrl, 1);
+          }
+        }}
+        serverUrl={printer.serverUrl}
       />
 
       {/* Zoom In & Out Side Action Buttons (Single Page View only) */}
-      {viewMode === 'single' && (
+      {!hideZoom && !isAnalyzingCost && viewMode === 'single' && (
         <>
           <SideActionButton
             side="right"
@@ -975,165 +1208,182 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
         </>
       )}
 
-      {/* List / Grid View: 2-column page layout with copy amounts matching mockup */}
-      <section
-        aria-label="Document pages list"
-        className={cn(
-          'flex-1 w-full max-w-[440px] overflow-y-auto px-4 pt-4 pb-12 z-10',
-          viewMode !== 'list' && 'hidden'
-        )}
-      >
-        <div className="grid grid-cols-2 gap-3.5 sm:gap-4">
-          {totalPages > 0 &&
-            Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => (
-              <PageThumbnailCard
-                key={pageNum}
-                pageNumber={pageNum}
-                pdfDoc={pdfDoc}
-                copies={pageCopies[pageNum] ?? 1}
-                isSelected={pageNum === currentPage}
-                onClick={() => {
-                  setCurrentPage(pageNum);
-                  setScale(1.0);
-                  setPan({ x: 0, y: 0 });
-                  setViewMode('single');
-                }}
-              />
-            ))}
-        </div>
-      </section>
-
-      {/* Single Page View */}
-      <div
-        className={cn(
-          'flex-1 w-full flex flex-col items-center justify-between z-10',
-          viewMode !== 'single' && 'hidden',
-          isMaximized && 'justify-center pb-6'
-        )}
-      >
-        {/* Sub-header Swipe Hint */}
-        <div className="z-10 w-full max-w-[430px] pt-3 pb-1 px-4 flex items-center justify-center">
-          <p className="text-[13px] sm:text-[14px] font-medium text-[#5A6072] tracking-wide flex items-center gap-1.5 opacity-90 select-none">
-            <span>&larr;</span> Swipe to change pages <span>&rarr;</span>
-          </p>
-        </div>
-
-        {/* Center Section: Zoomable & Swipeable Document Viewer Canvas */}
+      {/* Middle Content Workspace - Consistent Bounded Panel for Page Mode & List Mode */}
+      <div className="flex-1 w-full min-h-0 flex flex-col items-center justify-center relative overflow-hidden z-10">
+        {/* List / Grid View: Scrollable panel listing all pages */}
         <section
-          ref={containerRef}
-          aria-label="Document Page Viewer"
-          onTouchStart={handleTouchStart}
-          onTouchMove={handleTouchMove}
-          onTouchEnd={handleTouchEnd}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
-          className="relative flex-1 w-full max-w-[430px] flex flex-col items-center justify-center px-4 py-2 z-10 overflow-hidden touch-none"
+          aria-label="Document pages list"
+          className={cn(
+            'w-full max-w-[440px] h-full min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-4 z-10',
+            hideCopyStepper ? 'pb-28 sm:pb-32' : 'pb-12',
+            viewMode !== 'list' && 'hidden'
+          )}
         >
-          {/* Previous Page Desktop Arrow (Left) */}
-          {currentPage > 1 && (
-            <button
-              type="button"
-              onClick={handlePrevPage}
-              aria-label="Previous page"
-              className="absolute left-2 top-1/2 -translate-y-1/2 z-20 w-9 h-9 rounded-full bg-white/80 backdrop-blur-sm shadow-md border border-black/[0.06] flex items-center justify-center text-[#34418E] hover:bg-white active:scale-95 transition-all hidden sm:flex cursor-pointer"
-            >
-              <ChevronLeft className="w-5 h-5" />
-            </button>
-          )}
-
-          {/* Next Page Desktop Arrow (Right) */}
-          {currentPage < totalPages && (
-            <button
-              type="button"
-              onClick={handleNextPage}
-              aria-label="Next page"
-              className="absolute right-2 top-1/2 -translate-y-1/2 z-20 w-9 h-9 rounded-full bg-white/80 backdrop-blur-sm shadow-md border border-black/[0.06] flex items-center justify-center text-[#34418E] hover:bg-white active:scale-95 transition-all hidden sm:flex cursor-pointer"
-            >
-              <ChevronRight className="w-5 h-5" />
-            </button>
-          )}
-
-          {/* Document Sheet Display (Zoomable & Pannable) */}
-          <div
-            className={cn(
-              'relative transition-transform duration-75 ease-out select-none',
-              scale > 1.05 ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'
-            )}
-            style={{
-              transform: `scale(${scale}) translate(${pan.x / scale}px, ${pan.y / scale}px)`,
-              transformOrigin: 'center center',
-            }}
-          >
-            {/* Real PDF Canvas Container */}
-            <div
-              className={cn(
-                'bg-white rounded-[10px] shadow-[0_10px_35px_rgba(0,0,0,0.12)] border border-black/[0.06]',
-                'overflow-hidden flex items-center justify-center min-w-[280px] min-h-[380px] sm:min-w-[310px] sm:min-h-[420px] relative'
-              )}
-            >
-              {isRenderingPage && (
-                <div className="absolute inset-0 flex items-center justify-center bg-white/70 backdrop-blur-[1px] z-10">
-                  <Loader2 className="w-8 h-8 animate-spin text-[#34418E]" />
-                </div>
-              )}
-              <canvas
-                ref={canvasRef}
-                className="block max-w-full h-auto pointer-events-none"
-              />
-            </div>
-          </div>
-
-          {/* Indicators: 100% Zoom Indicator on the left of Page Indicator */}
-          <div className="w-full max-w-[340px] flex items-center justify-end gap-2 mt-2 z-20">
-            <button
-              type="button"
-              onClick={handleResetZoom}
-              title="Reset zoom to 100%"
-              aria-label={`Current zoom ${Math.round(scale * 100)}%, click to reset to 100%`}
-              className={cn(
-                'px-3 py-1.5 rounded-[12px] bg-[#EAEBED]/90 backdrop-blur-sm',
-                'border border-[#DCDFE5] text-[#3E4354] font-semibold text-[13px] sm:text-[14px]',
-                'shadow-[0_2px_8px_rgba(0,0,0,0.06)] select-none cursor-pointer',
-                'hover:bg-white active:scale-95 transition-all'
-              )}
-            >
-              {Math.round(scale * 100)}%
-            </button>
-            <PageIndicator currentPage={currentPage} totalPages={totalPages} />
+          <div className="grid grid-cols-2 gap-3.5 sm:gap-4 pb-12">
+            {totalPages > 0 &&
+              Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => (
+                <PageThumbnailCard
+                  key={pageNum}
+                  pageNumber={pageNum}
+                  pdfDoc={pdfDoc}
+                  copies={pageCopies[pageNum] ?? 1}
+                  isSelected={pageNum === currentPage}
+                  onClick={() => {
+                    setCurrentPage(pageNum);
+                    setScale(1.0);
+                    setPan({ x: 0, y: 0 });
+                    setViewMode('single');
+                    if (typeof window !== 'undefined') {
+                      window.scrollTo(0, 0);
+                    }
+                  }}
+                />
+              ))}
           </div>
         </section>
 
-        {/* Bottom Control Section: White Floating Card with Copy Stepper (hidden when maximized) */}
-        {!isMaximized && (
-          <footer className="w-full bg-white rounded-t-[30px] sm:rounded-t-[36px] shadow-[0_-8px_30px_rgba(0,0,0,0.06)] border-t border-black/[0.04] px-6 pt-5 pb-7 sm:pb-8 flex flex-col items-center justify-center z-20">
-            <div className="relative flex flex-col items-center">
-              {/* Copy Stepper Component: [-] [4 Amount] [+] */}
-              <CopyStepper
-                amount={currentCopies}
-                onAmountChange={handleAmountChange}
-                min={1}
-                max={99}
-              />
+        {/* Single Page View: Consistent panel sized for single page view */}
+        <div
+          className={cn(
+            'w-full h-full min-h-0 flex-1 flex flex-col items-center justify-between relative',
+            hideCopyStepper ? 'pb-24 sm:pb-28' : 'pb-2',
+            viewMode !== 'single' && 'hidden',
+            isMaximized && 'justify-center pb-6'
+          )}
+        >
+          {/* Center Section: Zoomable & Swipeable Document Viewer Canvas */}
+          <section
+            ref={containerRef}
+            aria-label="Document Page Viewer"
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerUp}
+            className="relative flex-1 min-h-0 w-full max-w-[430px] flex flex-col items-center justify-center px-4 py-1 overflow-hidden touch-none"
+          >
+            {/* Previous Page Desktop Arrow (Left) */}
+            {currentPage > 1 && (
+              <button
+                type="button"
+                onClick={handlePrevPage}
+                aria-label="Previous page"
+                className="absolute left-2 top-1/2 -translate-y-1/2 z-20 w-9 h-9 rounded-full bg-white/80 backdrop-blur-sm shadow-md border border-black/[0.06] flex items-center justify-center text-[#34418E] hover:bg-white active:scale-95 transition-all hidden sm:flex cursor-pointer"
+              >
+                <ChevronLeft className="w-5 h-5" />
+              </button>
+            )}
 
-              {/* Database Sync Status Indicator */}
-              <div className="h-5 mt-2 flex items-center justify-center">
-                {isSavingOptions && (
-                  <span className="text-[11px] font-medium text-[#34418E] flex items-center gap-1 animate-pulse">
-                    <Loader2 className="w-3 h-3 animate-spin" /> Saving changes...
-                  </span>
+            {/* Next Page Desktop Arrow (Right) */}
+            {currentPage < totalPages && (
+              <button
+                type="button"
+                onClick={handleNextPage}
+                aria-label="Next page"
+                className="absolute right-2 top-1/2 -translate-y-1/2 z-20 w-9 h-9 rounded-full bg-white/80 backdrop-blur-sm shadow-md border border-black/[0.06] flex items-center justify-center text-[#34418E] hover:bg-white active:scale-95 transition-all hidden sm:flex cursor-pointer"
+              >
+                <ChevronRight className="w-5 h-5" />
+              </button>
+            )}
+
+            {/* Document Sheet Display (Zoomable & Pannable) */}
+            <div
+              className={cn(
+                'relative transition-transform duration-75 ease-out select-none',
+                scale > 1.05 ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'
+              )}
+              style={{
+                transform: `scale(${scale}) translate(${pan.x / scale}px, ${pan.y / scale}px)`,
+                transformOrigin: 'center center',
+              }}
+            >
+              {/* Real PDF Canvas Container */}
+              <div
+                className={cn(
+                  'bg-white rounded-[10px] shadow-[0_10px_35px_rgba(0,0,0,0.12)] border border-black/[0.06]',
+                  'overflow-hidden flex items-center justify-center relative'
                 )}
-                {!isSavingOptions && showSaveIndicator && (
-                  <span className="text-[11px] font-medium text-emerald-600 flex items-center gap-1 transition-opacity">
-                    <Check className="w-3.5 h-3.5 stroke-[3]" /> Saved
-                  </span>
+              >
+                {isRenderingPage && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-white/70 backdrop-blur-[1px] z-10">
+                    <Loader2 className="w-8 h-8 animate-spin text-[#34418E]" />
+                  </div>
                 )}
+                <canvas
+                  ref={canvasRef}
+                  className="block max-w-full h-auto pointer-events-none"
+                />
               </div>
             </div>
-          </footer>
-        )}
+
+            {/* Indicators Row: Swipe to change page (left) + Zoom % & Page Indicator (right) */}
+            <div className="w-full max-w-[400px]  flex items-center justify-between gap-2 mt-2 z-20 shrink-0">
+              {/* Left Side: Swipe to change page with subtle breathing */}
+              <div
+                aria-label="Swipe gesture hint"
+                className="flex items-center gap-1.5 text-[12px] sm:text-[13px] font-medium text-[#5A6072] select-none animate-subtle-breathe"
+              >
+                <span className="text-[13px] leading-none" aria-hidden="true">&larr;</span>
+                <span>Swipe to change page</span>
+                <span className="text-[13px] leading-none" aria-hidden="true">&rarr;</span>
+              </div>
+
+              {/* Right Side: Zoom Percentage and Page Indicator */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleResetZoom}
+                  title="Reset zoom to 100%"
+                  aria-label={`Current zoom ${Math.round(scale * 100)}%, click to reset to 100%`}
+                  className={cn(
+                    'px-3 py-1.5 rounded-[12px] bg-[#EAEBED]/90 backdrop-blur-sm',
+                    'border border-[#DCDFE5] text-[#3E4354] font-semibold text-[13px] sm:text-[14px]',
+                    'shadow-[0_2px_8px_rgba(0,0,0,0.06)] select-none cursor-pointer',
+                    'hover:bg-white active:scale-95 transition-all'
+                  )}
+                >
+                  {Math.round(scale * 100)}%
+                </button>
+                <PageIndicator currentPage={currentPage} totalPages={totalPages} />
+              </div>
+            </div>
+          </section>
+
+          {/* Bottom Control Section: White Floating Card with Copy Stepper (hidden when maximized or hideCopyStepper) */}
+          {!hideCopyStepper && !isMaximized && (
+            <footer className="w-full shrink-0 bg-white rounded-t-[30px] sm:rounded-t-[36px] shadow-[0_-8px_30px_rgba(0,0,0,0.06)] border-t border-black/[0.04] px-6 pt-5 pb-7 sm:pb-8 flex flex-col items-center justify-center z-20">
+              <div className="relative flex flex-col items-center">
+                {/* Copy Stepper Component: [-] [4 Amount] [+] */}
+                <CopyStepper
+                  amount={currentCopies}
+                  onAmountChange={handleAmountChange}
+                  min={1}
+                  max={99}
+                />
+
+                {/* Database Sync Status Indicator */}
+                <div className="h-5 mt-2 flex items-center justify-center">
+                  {isSavingOptions && (
+                    <span className="text-[11px] font-medium text-[#34418E] flex items-center gap-1 animate-pulse">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Saving changes...
+                    </span>
+                  )}
+                  {!isSavingOptions && showSaveIndicator && (
+                    <span className="text-[11px] font-medium text-emerald-600 flex items-center gap-1 transition-opacity">
+                      <Check className="w-3.5 h-3.5 stroke-[3]" /> Saved
+                    </span>
+                  )}
+                </div>
+              </div>
+            </footer>
+          )}
+        </div>
       </div>
+
+      {/* Composable children slot (e.g. PaymentPanel overlay) */}
+      {children}
     </main>
   );
 };

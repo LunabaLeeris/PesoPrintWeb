@@ -12,12 +12,16 @@ describe('printer-service authentication & headers', () => {
   beforeEach(() => {
     process.env.KIOSK_SECRET_KEY = 'test-secret-key-123';
     process.env.NEXT_PUBLIC_KIOSK_SECRET_KEY = 'test-secret-key-123';
+    delete process.env.DISABLE_HEALTH_CHECKS;
+    delete process.env.NEXT_PUBLIC_DISABLE_HEALTH_CHECKS;
   });
 
   afterEach(() => {
     global.fetch = originalFetch;
     delete process.env.KIOSK_SECRET_KEY;
     delete process.env.NEXT_PUBLIC_KIOSK_SECRET_KEY;
+    delete process.env.DISABLE_HEALTH_CHECKS;
+    delete process.env.NEXT_PUBLIC_DISABLE_HEALTH_CHECKS;
   });
 
   it('retrieves the kiosk secret key from environment', () => {
@@ -124,5 +128,28 @@ describe('printer-service authentication & headers', () => {
       expect.objectContaining({ stage: 'completed', progress: 100 })
     );
     expect(onDone).toHaveBeenCalled();
+  });
+
+  it('bypasses pingServer when DISABLE_HEALTH_CHECKS is true', async () => {
+    process.env.DISABLE_HEALTH_CHECKS = 'true';
+    const mockFetch = jest.fn();
+    global.fetch = mockFetch;
+
+    const result = await pingServer('https://api.pesoprint.online');
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain('DISABLE_HEALTH_CHECKS');
+  });
+
+  it('bypasses pingServer when NEXT_PUBLIC_DISABLE_HEALTH_CHECKS is true', async () => {
+    process.env.NEXT_PUBLIC_DISABLE_HEALTH_CHECKS = 'true';
+    const mockFetch = jest.fn();
+    global.fetch = mockFetch;
+
+    const result = await pingServer('https://api.pesoprint.online');
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
   });
 });

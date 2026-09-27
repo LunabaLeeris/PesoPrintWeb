@@ -1,8 +1,17 @@
-import React, { forwardRef, KeyboardEvent, ReactNode } from 'react';
+import React, { forwardRef, KeyboardEvent, ReactNode, useEffect } from 'react';
 import Image from 'next/image';
 import { cn } from '@/lib/utils';
 
 export interface ModalPanelProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'title'> {
+  isOpen?: boolean;
+  onClose?: () => void;
+  closeOnBackdropClick?: boolean;
+  closeOnEscape?: boolean;
+  backdropClassName?: string;
+  containerClassName?: string;
+  backdropTestId?: string;
+  ariaLabelledBy?: string;
+  ariaDescribedBy?: string;
   illustration?: string;
   illustrationAlt?: string;
   title?: ReactNode;
@@ -115,17 +124,62 @@ export const ModalPanelActions = ({ className, children, ...props }: ModalPanelA
   </div>
 );
 
+export interface ModalPanelDetailsProps extends React.HTMLAttributes<HTMLDivElement> {
+  className?: string;
+  children: ReactNode;
+}
+
+export const ModalPanelDetails = ({ className, children, ...props }: ModalPanelDetailsProps) => (
+  <div
+    className={cn(
+      'w-full grid grid-cols-2 gap-x-4 gap-y-1.5 text-left text-[13.5px] sm:text-[14px] leading-relaxed mb-6 px-1',
+      className
+    )}
+    {...props}
+  >
+    {children}
+  </div>
+);
+
+export interface ModalPanelDetailItemProps extends React.HTMLAttributes<HTMLDivElement> {
+  label: string;
+  value: ReactNode;
+  className?: string;
+}
+
+export const ModalPanelDetailItem = ({
+  label,
+  value,
+  className,
+  ...props
+}: ModalPanelDetailItemProps) => (
+  <div className={cn('text-[#5A5E6B] font-medium text-[13.5px] sm:text-[14px]', className)} {...props}>
+    {label}: <span className="font-semibold text-[#2A2F3D]">{value}</span>
+  </div>
+);
+
 export interface ModalPanelComponent
   extends React.ForwardRefExoticComponent<ModalPanelProps & React.RefAttributes<HTMLDivElement>> {
   Icon: typeof ModalPanelIcon;
   Title: typeof ModalPanelTitle;
   Description: typeof ModalPanelDescription;
   Actions: typeof ModalPanelActions;
+  Details: typeof ModalPanelDetails;
+  DetailItem: typeof ModalPanelDetailItem;
 }
 
 export const ModalPanel = forwardRef<HTMLDivElement, ModalPanelProps>(
   (
     {
+      isOpen,
+      onClose,
+      closeOnBackdropClick = true,
+      closeOnEscape = true,
+      backdropClassName,
+      containerClassName,
+      backdropTestId,
+      ariaLabelledBy,
+      ariaDescribedBy,
       illustration,
       illustrationAlt,
       title,
@@ -139,6 +193,26 @@ export const ModalPanel = forwardRef<HTMLDivElement, ModalPanelProps>(
     },
     ref
   ) => {
+    const isModal = isOpen !== undefined;
+
+    // Handle Escape key when open as modal
+    useEffect(() => {
+      if (!isModal || !isOpen) return;
+
+      const handleGlobalKeyDown = (e: globalThis.KeyboardEvent) => {
+        if (e.key === 'Escape' && closeOnEscape) {
+          onClose?.();
+        }
+      };
+
+      window.addEventListener('keydown', handleGlobalKeyDown);
+      return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+    }, [isModal, isOpen, closeOnEscape, onClose]);
+
+    if (isModal && !isOpen) {
+      return null;
+    }
+
     const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
       if (isClickable && onClick && (e.key === 'Enter' || e.key === ' ')) {
         e.preventDefault();
@@ -147,7 +221,7 @@ export const ModalPanel = forwardRef<HTMLDivElement, ModalPanelProps>(
       props.onKeyDown?.(e);
     };
 
-    return (
+    const cardContent = (
       <div
         ref={ref}
         role={isClickable ? 'button' : undefined}
@@ -162,6 +236,7 @@ export const ModalPanel = forwardRef<HTMLDivElement, ModalPanelProps>(
           'flex flex-col items-center justify-center text-center',
           'shadow-[0_12px_36px_rgba(0,0,0,0.07)] border border-white/60',
           'transition-all duration-200 select-none',
+          isModal && 'py-8 sm:py-9 shadow-[0_16px_48px_rgba(0,0,0,0.14)]',
           isClickable && [
             'cursor-pointer',
             'hover:shadow-[0_16px_44px_rgba(0,0,0,0.11)] hover:-translate-y-0.5',
@@ -174,12 +249,48 @@ export const ModalPanel = forwardRef<HTMLDivElement, ModalPanelProps>(
       >
         {/* Shorthand or Compound */}
         {illustration && (
-          <ModalPanelIcon src={illustration} alt={illustrationAlt || (typeof title === 'string' ? title : 'Illustration')} />
+          <ModalPanelIcon
+            src={illustration}
+            alt={illustrationAlt || (typeof title === 'string' ? title : 'Illustration')}
+          />
         )}
         {title && <ModalPanelTitle>{title}</ModalPanelTitle>}
         {description && <ModalPanelDescription>{description}</ModalPanelDescription>}
-        {actions && <ModalPanelActions>{actions}</ModalPanelActions>}
         {children}
+        {actions && <ModalPanelActions>{actions}</ModalPanelActions>}
+      </div>
+    );
+
+    if (!isModal) {
+      return cardContent;
+    }
+
+    return (
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={ariaLabelledBy}
+        aria-describedby={ariaDescribedBy}
+        className={cn(
+          'fixed inset-0 z-[120] flex items-center justify-center p-4 select-none',
+          containerClassName
+        )}
+      >
+        {/* Dimmed backdrop */}
+        <div
+          data-testid={backdropTestId || 'modal-panel-backdrop'}
+          onClick={closeOnBackdropClick ? onClose : undefined}
+          aria-hidden="true"
+          className={cn(
+            'fixed inset-0 bg-black/40 backdrop-blur-[2px] transition-opacity animate-in fade-in duration-200',
+            backdropClassName
+          )}
+        />
+
+        {/* Modal Card Centered Container */}
+        <div className="relative z-10 w-full max-w-[340px] sm:max-w-[360px] animate-in zoom-in-95 fade-in duration-150">
+          {cardContent}
+        </div>
       </div>
     );
   }
@@ -190,3 +301,5 @@ ModalPanel.Icon = ModalPanelIcon;
 ModalPanel.Title = ModalPanelTitle;
 ModalPanel.Description = ModalPanelDescription;
 ModalPanel.Actions = ModalPanelActions;
+ModalPanel.Details = ModalPanelDetails;
+ModalPanel.DetailItem = ModalPanelDetailItem;
