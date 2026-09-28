@@ -162,7 +162,7 @@ export const UploadView: React.FC<UploadViewProps> = ({
         aria-label="Document Upload Section"
         className="flex-1 w-full max-w-[430px] flex flex-col items-center justify-center px-6 py-8 z-10"
       >
-        <div className="relative w-full max-w-[340px]">
+        <div className="relative w-full max-w-[340px] group">
           {/* Permanent file input in DOM to guarantee it never unmounts across state transitions */}
           <input
             id="mobile-pdf-upload"
@@ -186,7 +186,7 @@ export const UploadView: React.FC<UploadViewProps> = ({
               title="Press to upload a document"
               description="This kiosk only accept pdfs"
               isClickable={true}
-              className="w-full pointer-events-none"
+              className="w-full pointer-events-none animate-upload-breathe"
             />
           )}
 

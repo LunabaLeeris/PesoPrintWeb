@@ -6,6 +6,7 @@ import { Check } from 'lucide-react';
 import { NavBar } from '@/components/common/nav-bar';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { PrintConfirmationView } from './print-confirmation-view';
 
 export interface PrintTaskItem {
   id: string;
@@ -23,6 +24,9 @@ export interface PrintingViewProps {
   totalCopies?: number;
   colorScheme?: string;
   paperSize?: string;
+  initialShowConfirmation?: boolean;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pdfDoc?: any;
 }
 
 export const PrintingView: React.FC<PrintingViewProps> = ({
@@ -33,9 +37,14 @@ export const PrintingView: React.FC<PrintingViewProps> = ({
   totalCopies = 3,
   colorScheme = 'B&W',
   paperSize = 'A4',
+  initialShowConfirmation = false,
+  pdfDoc,
 }) => {
   const router = useRouter();
   const [progress, setProgress] = useState(47);
+  const [printRunId, setPrintRunId] = useState<number>(0);
+  const [isConfirmationOpen, setIsConfirmationOpen] = useState<boolean>(initialShowConfirmation);
+  const [reprintedIds, setReprintedIds] = useState<Set<string>>(new Set());
 
   const [tasks, setTasks] = useState<PrintTaskItem[]>([
     { id: 'task-1', name: 'Printing page 1',      pageNumber: 1, type: 'print', status: 'completed' },
@@ -53,7 +62,7 @@ export const PrintingView: React.FC<PrintingViewProps> = ({
           clearInterval(timer);
           return 100;
         }
-        const next = Math.min(100, prev + 12);
+        const next = Math.min(100, prev + 15);
 
         setTasks((prevTasks) =>
           prevTasks.map((t, idx) => {
@@ -69,17 +78,74 @@ export const PrintingView: React.FC<PrintingViewProps> = ({
 
         return next;
       });
-    }, 1800);
+    }, 1400);
 
     return () => clearInterval(timer);
-  }, []);
+  }, [printRunId]);
 
   const handleDone = () => {
-    router.push(`/kiosk/${kioskId}`);
+    setIsConfirmationOpen(true);
   };
 
+  const handleReprintFromConfirmation = (acceptedPairIds: string[]) => {
+    // 1. Add to reprinted ids
+    setReprintedIds((prev) => new Set([...prev, ...acceptedPairIds]));
+
+    // 2. Return to PrintingView
+    setIsConfirmationOpen(false);
+
+    // 3. Configure tasks for reprinting
+    const reprintTasks: PrintTaskItem[] = acceptedPairIds.flatMap((id, idx) => {
+      const pageMatch = id.match(/p(\d+)/);
+      const copyMatch = id.match(/c(\d+)/);
+      const pageNum = pageMatch ? parseInt(pageMatch[1], 10) : 1;
+      const copyIdx = copyMatch ? parseInt(copyMatch[1], 10) : 0;
+      const pageLabel = copyIdx > 0 ? `page ${pageNum} (${copyIdx})` : `page ${pageNum}`;
+
+      return [
+        {
+          id: `reprint-print-${idx}`,
+          name: `Reprinting ${pageLabel}`,
+          pageNumber: pageNum,
+          type: 'print',
+          status: 'in_progress',
+        },
+        {
+          id: `reprint-scan-${idx}`,
+          name: `Scanning ${pageLabel}`,
+          pageNumber: pageNum,
+          type: 'scan',
+          status: 'pending',
+        },
+      ];
+    });
+
+    if (reprintTasks.length > 0) {
+      setTasks(reprintTasks);
+    }
+
+    // 4. Reset progress and start timer
+    setProgress(0);
+    setPrintRunId((prev) => prev + 1);
+  };
+
+  if (isConfirmationOpen) {
+    return (
+      <PrintConfirmationView
+        kioskId={kioskId}
+        documentId={documentId}
+        pdfDoc={pdfDoc}
+        totalPages={totalPages}
+        totalCopies={totalCopies}
+        reprintedPairIds={Array.from(reprintedIds)}
+        onDone={() => router.push(`/kiosk/${kioskId}`)}
+        onReprint={handleReprintFromConfirmation}
+      />
+    );
+  }
+
   return (
-    <main className="relative h-screen h-[100dvh] max-h-screen w-full bg-[#E6E6E6] flex flex-col items-center justify-between overflow-hidden select-none">
+    <main className="relative h-screen h-[100dvh] max-h-screen w-full bg-[#E6E6E6] flex flex-col items-center justify-start overflow-hidden select-none">
       {/* Background Grid Pattern */}
       <div
         className="absolute inset-0 pointer-events-none z-0 flex items-center justify-center overflow-hidden"
@@ -111,13 +177,15 @@ export const PrintingView: React.FC<PrintingViewProps> = ({
           className={cn(
             'w-full flex-1 min-h-0 bg-white rounded-t-[32px] sm:rounded-t-[36px]',
             'shadow-[0_-12px_45px_rgba(0,0,0,0.12)] border-t border-black/[0.04]',
-            'flex flex-col px-6 pt-7 sm:pt-8 pb-4 overflow-y-auto'
+            'flex flex-col px-6 pt-7 sm:pt-8 pb-8 sm:pb-10 overflow-y-auto'
           )}
         >
           {/* Header Row: Title & Percentage */}
           <div className="flex items-center justify-between w-full mb-3">
             <h2 className="text-[22px] sm:text-[24px] font-bold text-[#1E2026] tracking-tight">
-              {progress === 100 ? 'Printing Complete' : 'Printing...'}
+              {progress === 100
+                ? (reprintedIds.size > 0 ? 'Reprinting Complete' : 'Printing Complete')
+                : (reprintedIds.size > 0 ? 'Reprinting...' : 'Printing...')}
             </h2>
             <span className="text-[20px] sm:text-[22px] font-bold text-[#1E2026]">
               {progress}%
@@ -163,12 +231,12 @@ export const PrintingView: React.FC<PrintingViewProps> = ({
 
           {/* Done Button when finished */}
           {progress === 100 && (
-            <div className="w-full flex justify-center mt-6 shrink-0 animate-fadeIn">
+            <div className="w-full flex justify-center mt-6 sm:mt-8 pb-4 shrink-0 animate-fadeIn">
               <Button
                 variant="primary"
                 size="lg"
                 onClick={handleDone}
-                className="w-[180px] sm:w-[200px] h-[52px] rounded-[18px] text-[16px] font-bold shadow-[0_4px_16px_rgba(52,65,142,0.3)] bg-[#34418E] hover:bg-[#28326D] active:scale-95 transition-all"
+                className="w-[180px] sm:w-[200px] h-[52px] rounded-[18px] text-[16px] font-bold shadow-[0_4px_16px_rgba(52,65,142,0.3)] bg-[#34418E] hover:bg-[#28326D] active:scale-95 transition-all cursor-pointer"
               >
                 Done
               </Button>
@@ -176,13 +244,6 @@ export const PrintingView: React.FC<PrintingViewProps> = ({
           )}
         </section>
       </div>
-
-      {/* Footer Branding */}
-      <footer className="w-full text-center pb-8 pt-2 z-10">
-        <p className="text-[13px] font-medium text-[#7C808E] select-none tracking-wide">
-          Peso Print - 2026
-        </p>
-      </footer>
     </main>
   );
 };

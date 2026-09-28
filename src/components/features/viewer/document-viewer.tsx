@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { NavBar } from '@/components/common/nav-bar';
 import { ModalPanel } from '@/components/common/modal-panel';
@@ -9,6 +9,7 @@ import { DocumentRow, PagePrintOption } from '@/types';
 import { updateDocumentPrintOptions, deleteDocumentRecord } from '@/services/kiosk-service';
 import { deletePrintDocument } from '@/services/storage-service';
 import { resolveKioskId } from '@/lib/kiosk';
+import { createClient } from '@/lib/supabase/client';
 import {
   CopyStepper,
   PageIndicator,
@@ -17,8 +18,10 @@ import {
   ViewerMenuPanel,
   PrintStreamModal,
   AnalyzingCostView,
+  OrganizePagesView,
   PrintOptions,
 } from './components';
+import { saveCachedDocumentId } from '@/lib/document-cache';
 import {
   analyzePdfPageCoverage,
   requestDocumentCostCalculation,
@@ -58,7 +61,7 @@ export interface DocumentViewerProps {
   file?: File | null;
   onBack?: () => void;
   onHelpClick?: () => void;
-  initialViewMode?: 'single' | 'list';
+  initialViewMode?: 'single' | 'list' | 'organize';
   hideMenu?: boolean;
   hideMaximize?: boolean;
   hideCopyStepper?: boolean;
@@ -88,8 +91,8 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
   const renderedPageRef = useRef<number | null>(null);
 
   const [documentData, setDocumentData] = useState<DocumentRow | null>(initialDocument || null);
-  const [currentPage, setCurrentPage] = useState<number>(1);
-  const [totalPages, setTotalPages] = useState<number>(1);
+  const [currentVisibleIndex, setCurrentVisibleIndex] = useState<number>(1);
+  const [totalPdfPages, setTotalPdfPages] = useState<number>(1);
   const [scale, setScale] = useState<number>(1.0);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isLoadingPdf, setIsLoadingPdf] = useState<boolean>(true);
@@ -99,21 +102,47 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
   const [isMenuOpen, setIsMenuOpen] = useState<boolean>(false);
   const [isCancelModalOpen, setIsCancelModalOpen] = useState<boolean>(false);
   const [isDeletingDocument, setIsDeletingDocument] = useState<boolean>(false);
-  const [viewMode, setViewMode] = useState<'single' | 'list'>(initialViewMode);
+  const [viewMode, setViewMode] = useState<'single' | 'list' | 'organize'>(initialViewMode);
   const [isMaximized, setIsMaximized] = useState<boolean>(false);
 
-  // Map of page number -> copy count
-  const [pageCopies, setPageCopies] = useState<Record<number, number>>(() => {
-    const map: Record<number, number> = { 1: 1 };
-    if (initialDocument?.options && Array.isArray(initialDocument.options)) {
-      initialDocument.options.forEach((opt) => {
-        if (Array.isArray(opt) && opt.length >= 2) {
-          map[opt[0]] = opt[1];
-        }
-      });
+  // Synchronize documentData when initialDocument prop updates
+  useEffect(() => {
+    if (initialDocument) {
+      setDocumentData(initialDocument);
     }
-    return map;
-  });
+  }, [initialDocument]);
+
+  const activeDocId = documentId || initialDocument?.id;
+  const activeKioskId = kioskId || initialDocument?.kiosk_id;
+
+  // Fetch document row from Supabase if not provided or to ensure fresh options
+  useEffect(() => {
+    if (!documentData && activeDocId) {
+      let isCancelled = false;
+      async function fetchDoc() {
+        try {
+          const supabase = createClient();
+          const { data, error } = await supabase
+            .from('documents')
+            .select('*')
+            .eq('id', activeDocId)
+            .maybeSingle();
+
+          if (!isCancelled && !error && data) {
+            setDocumentData(data as DocumentRow);
+          }
+        } catch (err) {
+          console.error('Failed to fetch document row:', err);
+        }
+      }
+
+      fetchDoc();
+
+      return () => {
+        isCancelled = true;
+      };
+    }
+  }, [activeDocId, documentData]);
 
   // Touch and Drag State
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
@@ -124,9 +153,56 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
   // Debounced database sync ref
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Determine active document ID and kiosk ID
-  const activeDocId = documentId || initialDocument?.id;
-  const activeKioskId = kioskId || initialDocument?.kiosk_id;
+  // Raw options from documentData or initialDocument or default 1..totalPdfPages
+  const rawOptions: PagePrintOption[] = useMemo(() => {
+    const opts = documentData?.options || initialDocument?.options;
+    if (Array.isArray(opts) && opts.length > 0) {
+      return opts;
+    }
+    const count = totalPdfPages || 1;
+    return Array.from({ length: count }, (_, i) => [i + 1, 1]);
+  }, [documentData?.options, initialDocument?.options, totalPdfPages]);
+
+  // Positive visible pages strictly in options order; pages <= 0 are skipped
+  const visiblePages = useMemo(() => {
+    const list: { pageNumber: number; copies: number; optionsIndex: number }[] = [];
+    rawOptions.forEach((opt, idx) => {
+      if (Array.isArray(opt) && opt.length >= 2) {
+        const pageNum = opt[0];
+        const copies = opt[1];
+        if (pageNum > 0) {
+          list.push({
+            pageNumber: pageNum,
+            copies: copies > 0 ? copies : 1,
+            optionsIndex: idx,
+          });
+        }
+      }
+    });
+    return list;
+  }, [rawOptions]);
+
+  const totalVisibleCount = visiblePages.length;
+  const safeVisibleIndex = totalVisibleCount > 0
+    ? Math.min(Math.max(1, currentVisibleIndex), totalVisibleCount)
+    : 0;
+  const activeVisibleItem = totalVisibleCount > 0 ? visiblePages[safeVisibleIndex - 1] : null;
+  const activePdfPageNumber = activeVisibleItem ? activeVisibleItem.pageNumber : 1;
+  const currentCopies = activeVisibleItem ? activeVisibleItem.copies : 1;
+
+  // Auto-clamp current visible index if total visible count shrinks
+  useEffect(() => {
+    if (totalVisibleCount > 0 && currentVisibleIndex > totalVisibleCount) {
+      setCurrentVisibleIndex(totalVisibleCount);
+    }
+  }, [totalVisibleCount, currentVisibleIndex]);
+
+  // Persist active document ID into client-side cache
+  useEffect(() => {
+    if (activeDocId) {
+      saveCachedDocumentId(activeDocId);
+    }
+  }, [activeDocId]);
 
   // Stable document cache key across re-renders and view toggles
   const documentCacheKey = React.useMemo(() => {
@@ -173,6 +249,11 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
       colorScheme: 'B&W',
     };
 
+    if (visiblePages.length === 0) {
+      alert('There are no pages to print.');
+      return;
+    }
+
     setIsMenuOpen(false);
     setIsAnalyzingCost(true);
     setAnalysisProgress(0);
@@ -181,16 +262,18 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
 
     try {
       const pageMetrics: PageCostCalculationInput[] = [];
-      const totalToAnalyze = Math.max(1, totalPages);
+      const totalToAnalyze = visiblePages.length;
 
-      for (let p = 1; p <= totalToAnalyze; p++) {
+      for (let idx = 0; idx < totalToAnalyze; idx++) {
         if (isAnalysisCancelledRef.current) return;
+        const item = visiblePages[idx];
+        const displayPageNum = idx + 1;
 
-        const currentProgress = Math.round(((p - 1) / totalToAnalyze) * 85);
+        const currentProgress = Math.round((idx / totalToAnalyze) * 85);
         setAnalysisProgress(currentProgress);
         setAnalysisStatusText(
           totalToAnalyze > 1
-            ? `reading rgb distribution (page ${p} of ${totalToAnalyze})...`
+            ? `reading rgb distribution (page ${displayPageNum} of ${totalToAnalyze})...`
             : 'reading rgb distribution...'
         );
 
@@ -198,12 +281,12 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
         await new Promise((resolve) => setTimeout(resolve, 30));
         if (isAnalysisCancelledRef.current) return;
 
-        const coverage = await analyzePdfPageCoverage(pdfDoc, p);
+        const coverage = await analyzePdfPageCoverage(pdfDoc, item.pageNumber);
         if (isAnalysisCancelledRef.current) return;
 
         pageMetrics.push({
-          pageNumber: p,
-          copies: pageCopies[p] ?? 1,
+          pageNumber: item.pageNumber,
+          copies: item.copies,
           blackPpc: coverage.blackPpc,
           colorPpc: coverage.colorPpc,
         });
@@ -296,16 +379,23 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
       if (cachedPdf) {
         setPdfDoc(cachedPdf);
         const pagesCount = cachedPdf.numPages || 1;
-        setTotalPages(pagesCount);
-        setPageCopies((prev) => {
-          const next = { ...prev };
-          for (let i = 1; i <= pagesCount; i++) {
-            if (next[i] === undefined) {
-              next[i] = 1;
-            }
-          }
-          return next;
-        });
+        setTotalPdfPages(pagesCount);
+
+        // Initialize DB options if it was only upload placeholder [[1, 1]] while doc has multiple pages
+        const cachedCurrentOpts = documentData?.options || initialDocument?.options;
+        if (
+          activeDocId &&
+          pagesCount > 1 &&
+          (!cachedCurrentOpts ||
+            cachedCurrentOpts.length === 0 ||
+            (cachedCurrentOpts.length === 1 && cachedCurrentOpts[0][0] === 1))
+        ) {
+          const fullOpts: PagePrintOption[] = Array.from({ length: pagesCount }, (_, i) => [i + 1, 1]);
+          updateDocumentPrintOptions(activeDocId, fullOpts)
+            .then((updated) => setDocumentData(updated))
+            .catch((err) => console.error('Failed to init options in DB:', err));
+        }
+
         setIsLoadingPdf(false);
         return;
       }
@@ -328,18 +418,22 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
         if (pdfUrl) pdfDocMemoryCache.set(pdfUrl, loadedPdf);
         setPdfDoc(loadedPdf);
         const pagesCount = loadedPdf.numPages || 1;
-        setTotalPages(pagesCount);
+        setTotalPdfPages(pagesCount);
 
-        // Ensure every page has at least default copy count (1) if not already set
-        setPageCopies((prev) => {
-          const next = { ...prev };
-          for (let i = 1; i <= pagesCount; i++) {
-            if (next[i] === undefined) {
-              next[i] = 1;
-            }
-          }
-          return next;
-        });
+        // Initialize DB options if it was only upload placeholder [[1, 1]] while doc has multiple pages
+        const currentOpts = documentData?.options || initialDocument?.options;
+        if (
+          activeDocId &&
+          pagesCount > 1 &&
+          (!currentOpts ||
+            currentOpts.length === 0 ||
+            (currentOpts.length === 1 && currentOpts[0][0] === 1))
+        ) {
+          const fullOpts: PagePrintOption[] = Array.from({ length: pagesCount }, (_, i) => [i + 1, 1]);
+          updateDocumentPrintOptions(activeDocId, fullOpts)
+            .then((updated) => setDocumentData(updated))
+            .catch((err) => console.error('Failed to init options in DB:', err));
+        }
 
         setIsLoadingPdf(false);
       } catch (err) {
@@ -364,17 +458,17 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let currentRenderTask: any = null;
 
-    // Background prefetch function to pre-render adjacent pages into offscreen canvases
-    function triggerPrefetch(current: number) {
-      if (!pdfDoc || typeof document === 'undefined') return;
+    // Background prefetch function to pre-render adjacent visible pages into offscreen canvases
+    function triggerPrefetch(currentVisibleIdx: number) {
+      if (!pdfDoc || typeof document === 'undefined' || visiblePages.length === 0) return;
 
-      // Prioritize immediate next and previous pages, then subsequent pages (up to 3 ahead and behind)
+      // Prioritize immediate next and previous visible pages
       const candidatePages: number[] = [];
       for (let offset = 1; offset <= 3; offset++) {
-        const nextP = current + offset;
-        if (nextP <= totalPages) candidatePages.push(nextP);
-        const prevP = current - offset;
-        if (prevP >= 1) candidatePages.push(prevP);
+        const nextItem = visiblePages[currentVisibleIdx - 1 + offset];
+        if (nextItem && nextItem.pageNumber > 0) candidatePages.push(nextItem.pageNumber);
+        const prevItem = visiblePages[currentVisibleIdx - 1 - offset];
+        if (prevItem && prevItem.pageNumber > 0) candidatePages.push(prevItem.pageNumber);
       }
 
       const pagesToPrefetch = candidatePages.filter(
@@ -457,9 +551,12 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
 
       const canvas = canvasRef.current;
       if (!pdfDoc || !canvas || isLoadingPdf) return;
+      if (visiblePages.length === 0 || !activeVisibleItem) return;
+
+      const targetPdfPage = activePdfPageNumber;
 
       // 1. If this page is already in our in-memory rendered canvas cache, draw it instantly without loading spinner!
-      const cached = getCachedCanvas(documentCacheKey, currentPage);
+      const cached = getCachedCanvas(documentCacheKey, targetPdfPage);
       if (cached) {
         const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
         canvas.width = cached.width;
@@ -471,20 +568,20 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
           ctx.clearRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(cached, 0, 0);
         }
-        renderedPageRef.current = currentPage;
+        renderedPageRef.current = targetPdfPage;
         setIsRenderingPage(false);
-        triggerPrefetch(currentPage);
+        triggerPrefetch(safeVisibleIndex);
         return;
       }
 
-      // If already drawn on canvas and matches current page, keep it
-      if (renderedPageRef.current === currentPage && canvas.width > 0) {
-        triggerPrefetch(currentPage);
+      // If already drawn on canvas and matches current target page, keep it
+      if (renderedPageRef.current === targetPdfPage && canvas.width > 0) {
+        triggerPrefetch(safeVisibleIndex);
         return;
       }
 
       // 2. Check if an in-flight background render promise already exists for this page to prevent duplicate rendering
-      const inFlight = inFlightRenderPromises.get(documentCacheKey)?.get(currentPage);
+      const inFlight = inFlightRenderPromises.get(documentCacheKey)?.get(targetPdfPage);
       if (inFlight) {
         setIsRenderingPage(true);
         try {
@@ -500,8 +597,8 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.drawImage(renderedCanvas, 0, 0);
           }
-          renderedPageRef.current = currentPage;
-          triggerPrefetch(currentPage);
+          renderedPageRef.current = targetPdfPage;
+          triggerPrefetch(safeVisibleIndex);
         } catch (err) {
           console.error('In-flight render failed, falling back to direct render:', err);
         } finally {
@@ -515,7 +612,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
       // 3. Otherwise perform fresh render
       try {
         setIsRenderingPage(true);
-        const page = await pdfDoc.getPage(currentPage);
+        const page = await pdfDoc.getPage(targetPdfPage);
         if (isCancelled) return;
 
         const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
@@ -553,7 +650,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
         }
 
         if (!isCancelled) {
-          renderedPageRef.current = currentPage;
+          renderedPageRef.current = targetPdfPage;
 
           // Save rendered bitmap to cache so it never needs to be re-rendered
           try {
@@ -564,14 +661,14 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
               const cacheCtx = cacheCanvas.getContext('2d');
               if (cacheCtx) {
                 cacheCtx.drawImage(canvas, 0, 0);
-                setCachedCanvas(documentCacheKey, currentPage, cacheCanvas);
+                setCachedCanvas(documentCacheKey, targetPdfPage, cacheCanvas);
               }
             }
           } catch {
             // Ignore cache canvas copy errors
           }
 
-          triggerPrefetch(currentPage);
+          triggerPrefetch(safeVisibleIndex);
         }
       } catch (error: unknown) {
         const err = error as { name?: string; message?: string };
@@ -602,29 +699,39 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
         currentRenderTask.cancel();
       }
     };
-  }, [pdfDoc, currentPage, isLoadingPdf, viewMode, totalPages, documentCacheKey]);
+  }, [
+    pdfDoc,
+    activePdfPageNumber,
+    safeVisibleIndex,
+    visiblePages,
+    isLoadingPdf,
+    viewMode,
+    isMaximized,
+    hideCopyStepper,
+    documentCacheKey,
+  ]);
 
   // Reset rendered page tracker when document changes
   useEffect(() => {
     renderedPageRef.current = null;
   }, [documentCacheKey]);
 
-  // Navigation handlers
+  // Navigation handlers across visible pages
   const handlePrevPage = useCallback(() => {
-    if (currentPage > 1) {
-      setCurrentPage((prev) => prev - 1);
+    if (safeVisibleIndex > 1) {
+      setCurrentVisibleIndex(safeVisibleIndex - 1);
       setScale(1.0);
       setPan({ x: 0, y: 0 });
     }
-  }, [currentPage]);
+  }, [safeVisibleIndex]);
 
   const handleNextPage = useCallback(() => {
-    if (currentPage < totalPages) {
-      setCurrentPage((prev) => prev + 1);
+    if (safeVisibleIndex < totalVisibleCount) {
+      setCurrentVisibleIndex(safeVisibleIndex + 1);
       setScale(1.0);
       setPan({ x: 0, y: 0 });
     }
-  }, [currentPage, totalPages]);
+  }, [safeVisibleIndex, totalVisibleCount]);
 
   // Keyboard navigation
   useEffect(() => {
@@ -639,19 +746,14 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handlePrevPage, handleNextPage]);
 
-  // Sync copy amount changes directly to Supabase
+  // Sync copy amount changes directly to Supabase preserving rawOptions
   const syncOptionsToSupabase = useCallback(
-    async (updatedMap: Record<number, number>) => {
+    async (updatedOptions: PagePrintOption[]) => {
       if (!activeDocId) return;
 
       setIsSavingOptions(true);
       try {
-        const optionsArray: PagePrintOption[] = [];
-        for (let p = 1; p <= totalPages; p++) {
-          optionsArray.push([p, updatedMap[p] ?? 1]);
-        }
-
-        const updatedDoc = await updateDocumentPrintOptions(activeDocId, optionsArray);
+        const updatedDoc = await updateDocumentPrintOptions(activeDocId, updatedOptions);
         setDocumentData(updatedDoc);
         setShowSaveIndicator(true);
         setTimeout(() => setShowSaveIndicator(false), 2000);
@@ -661,24 +763,29 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
         setIsSavingOptions(false);
       }
     },
-    [activeDocId, totalPages]
+    [activeDocId]
   );
 
-  // Update copy amount for the CURRENT page (minimum 1, 0 is reserved for deletion page)
+  // Update copy amount for the CURRENT active visible page at its specific optionsIndex
   const handleAmountChange = (newAmount: number) => {
+    if (!activeVisibleItem) return;
     const clampedAmount = Math.max(1, newAmount);
-    const updatedMap = {
-      ...pageCopies,
-      [currentPage]: clampedAmount,
-    };
-    setPageCopies(updatedMap);
+
+    const updatedOptions = rawOptions.map((opt, idx) => {
+      if (idx === activeVisibleItem.optionsIndex) {
+        return [opt[0], clampedAmount] as PagePrintOption;
+      }
+      return opt;
+    });
+
+    setDocumentData((prev) => (prev ? { ...prev, options: updatedOptions } : null));
 
     // Debounce database sync to avoid spamming while user is clicking buttons
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
     }
     saveTimeoutRef.current = setTimeout(() => {
-      syncOptionsToSupabase(updatedMap);
+      syncOptionsToSupabase(updatedOptions);
     }, 350);
   };
 
@@ -984,8 +1091,6 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
     );
   }
 
-  const currentCopies = pageCopies[currentPage] ?? 1;
-
   return (
     <main className="relative h-screen h-[100dvh] max-h-screen w-full bg-[#E6E6E6] flex flex-col items-center overflow-hidden select-none">
       {/* Background Grid Pattern */}
@@ -1009,7 +1114,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
 
       {/* Screen Side Action Buttons (sticking to screen edges for easy single-hand access) */}
       {/* 1. Red Cancel Button (left side, y=170px) */}
-      {!isMaximized && (
+      {!isMaximized && viewMode !== 'organize' && (
         <SideActionButton
           side="left"
           y="170px"
@@ -1031,7 +1136,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
       )}
 
       {/* 2. Toggle List / Single View Button (left side, moved downward to y=236px) */}
-      {!isMaximized && (
+      {!isMaximized && viewMode !== 'organize' && (
         <SideActionButton
           side="left"
           y="400px"
@@ -1063,7 +1168,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
         />
       )}
 
-      {!hideMenu && !isMaximized && (
+      {!hideMenu && !isMaximized && viewMode !== 'organize' && (
         <SideActionButton
           side="right"
           y="170px"
@@ -1083,9 +1188,9 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
         onOrganizePages={() => {
           setIsMenuOpen(false);
           setIsMaximized(false);
-          setViewMode('list');
+          setViewMode('organize');
         }}
-        totalPages={totalPages}
+        totalPages={totalVisibleCount}
         onPrint={handleStartCostAnalysis}
       />
 
@@ -1210,7 +1315,24 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
 
       {/* Middle Content Workspace - Consistent Bounded Panel for Page Mode & List Mode */}
       <div className="flex-1 w-full min-h-0 flex flex-col items-center justify-center relative overflow-hidden z-10">
-        {/* List / Grid View: Scrollable panel listing all pages */}
+        {/* Organize Pages Mode: Interactive grid for deleting and rearranging pages */}
+        {viewMode === 'organize' && (
+          <OrganizePagesView
+            pdfDoc={pdfDoc}
+            pdfUrl={pdfUrl}
+            documentId={activeDocId}
+            kioskId={activeKioskId}
+            totalPages={totalPdfPages}
+            initialOptions={documentData?.options || initialDocument?.options}
+            onBack={() => setViewMode('single')}
+            onSaveSuccess={(newOptions) => {
+              setDocumentData((prev) => (prev ? { ...prev, options: newOptions } : null));
+              setViewMode('single');
+            }}
+          />
+        )}
+
+        {/* List / Grid View: Scrollable panel listing visible pages */}
         <section
           aria-label="Document pages list"
           className={cn(
@@ -1220,25 +1342,34 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
           )}
         >
           <div className="grid grid-cols-2 gap-3.5 sm:gap-4 pb-12">
-            {totalPages > 0 &&
-              Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => (
-                <PageThumbnailCard
-                  key={pageNum}
-                  pageNumber={pageNum}
-                  pdfDoc={pdfDoc}
-                  copies={pageCopies[pageNum] ?? 1}
-                  isSelected={pageNum === currentPage}
-                  onClick={() => {
-                    setCurrentPage(pageNum);
-                    setScale(1.0);
-                    setPan({ x: 0, y: 0 });
-                    setViewMode('single');
-                    if (typeof window !== 'undefined') {
-                      window.scrollTo(0, 0);
-                    }
-                  }}
-                />
-              ))}
+            {visiblePages.length > 0 ? (
+              visiblePages.map((item, index) => {
+                const visibleIndex = index + 1;
+                return (
+                  <PageThumbnailCard
+                    key={`${item.pageNumber}-${index}`}
+                    pageNumber={item.pageNumber}
+                    pdfDoc={pdfDoc}
+                    copies={item.copies}
+                    isSelected={visibleIndex === safeVisibleIndex}
+                    onClick={() => {
+                      setCurrentVisibleIndex(visibleIndex);
+                      setScale(1.0);
+                      setPan({ x: 0, y: 0 });
+                      setViewMode('single');
+                      if (typeof window !== 'undefined') {
+                        window.scrollTo(0, 0);
+                      }
+                    }}
+                  />
+                );
+              })
+            ) : (
+              <div className="col-span-2 py-12 text-center text-[#5A6072]">
+                <p className="font-semibold text-base mb-1">No pages to display</p>
+                <p className="text-xs text-[#8A90A2]">All pages have been excluded.</p>
+              </div>
+            )}
           </div>
         </section>
 
@@ -1265,7 +1396,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
             className="relative flex-1 min-h-0 w-full max-w-[430px] flex flex-col items-center justify-center px-4 py-1 overflow-hidden touch-none"
           >
             {/* Previous Page Desktop Arrow (Left) */}
-            {currentPage > 1 && (
+            {safeVisibleIndex > 1 && (
               <button
                 type="button"
                 onClick={handlePrevPage}
@@ -1277,7 +1408,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
             )}
 
             {/* Next Page Desktop Arrow (Right) */}
-            {currentPage < totalPages && (
+            {safeVisibleIndex < totalVisibleCount && (
               <button
                 type="button"
                 onClick={handleNextPage}
@@ -1289,37 +1420,46 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
             )}
 
             {/* Document Sheet Display (Zoomable & Pannable) */}
-            <div
-              className={cn(
-                'relative transition-transform duration-75 ease-out select-none',
-                scale > 1.05 ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'
-              )}
-              style={{
-                transform: `scale(${scale}) translate(${pan.x / scale}px, ${pan.y / scale}px)`,
-                transformOrigin: 'center center',
-              }}
-            >
-              {/* Real PDF Canvas Container */}
+            {visiblePages.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 px-6 text-center text-[#5A6072] bg-white rounded-[16px] shadow-sm border border-black/[0.06] max-w-[320px]">
+                <p className="font-semibold text-[15px] mb-1 text-[#2B3040]">No pages to display</p>
+                <p className="text-[13px] text-[#7C808E]">
+                  All pages in this document have been excluded from printing.
+                </p>
+              </div>
+            ) : (
               <div
                 className={cn(
-                  'bg-white rounded-[10px] shadow-[0_10px_35px_rgba(0,0,0,0.12)] border border-black/[0.06]',
-                  'overflow-hidden flex items-center justify-center relative'
+                  'relative transition-transform duration-75 ease-out select-none',
+                  scale > 1.05 ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'
                 )}
+                style={{
+                  transform: `scale(${scale}) translate(${pan.x / scale}px, ${pan.y / scale}px)`,
+                  transformOrigin: 'center center',
+                }}
               >
-                {isRenderingPage && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-white/70 backdrop-blur-[1px] z-10">
-                    <Loader2 className="w-8 h-8 animate-spin text-[#34418E]" />
-                  </div>
-                )}
-                <canvas
-                  ref={canvasRef}
-                  className="block max-w-full h-auto pointer-events-none"
-                />
+                {/* Real PDF Canvas Container */}
+                <div
+                  className={cn(
+                    'bg-white rounded-[10px] shadow-[0_10px_35px_rgba(0,0,0,0.12)] border border-black/[0.06]',
+                    'overflow-hidden flex items-center justify-center relative'
+                  )}
+                >
+                  {isRenderingPage && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-white/70 backdrop-blur-[1px] z-10">
+                      <Loader2 className="w-8 h-8 animate-spin text-[#34418E]" />
+                    </div>
+                  )}
+                  <canvas
+                    ref={canvasRef}
+                    className="block max-w-full h-auto pointer-events-none"
+                  />
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Indicators Row: Swipe to change page (left) + Zoom % & Page Indicator (right) */}
-            <div className="w-full max-w-[400px]  flex items-center justify-between gap-2 mt-2 z-20 shrink-0">
+            <div className="w-full max-w-[400px] flex items-center justify-between gap-2 mt-2 z-20 shrink-0">
               {/* Left Side: Swipe to change page with subtle breathing */}
               <div
                 aria-label="Swipe gesture hint"
@@ -1346,7 +1486,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
                 >
                   {Math.round(scale * 100)}%
                 </button>
-                <PageIndicator currentPage={currentPage} totalPages={totalPages} />
+                <PageIndicator currentPage={safeVisibleIndex} totalPages={totalVisibleCount} />
               </div>
             </div>
           </section>
@@ -1361,6 +1501,7 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
                   onAmountChange={handleAmountChange}
                   min={1}
                   max={99}
+                  disabled={visiblePages.length === 0}
                 />
 
                 {/* Database Sync Status Indicator */}

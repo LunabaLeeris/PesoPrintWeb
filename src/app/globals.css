@@ -79,6 +79,35 @@ body {
   will-change: opacity, transform;
 }
 
+@keyframes uploadBreathe {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.07), 0 0 0 0 rgba(52, 65, 142, 0);
+  }
+  50% {
+    transform: scale(1.026);
+    box-shadow: 0 20px 48px rgba(52, 65, 142, 0.17), 0 0 22px rgba(52, 65, 142, 0.1);
+  }
+}
+
+.animate-upload-breathe {
+  animation: uploadBreathe 3s ease-in-out infinite;
+  will-change: transform, box-shadow;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.group:hover .animate-upload-breathe {
+  animation-play-state: paused;
+  transform: scale(1.03);
+  box-shadow: 0 22px 50px rgba(52, 65, 142, 0.22), 0 0 26px rgba(52, 65, 142, 0.14);
+}
+
+.group:active .animate-upload-breathe {
+  animation-play-state: paused;
+  transform: scale(0.985);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-slide-up {
     animation: none !important;
@@ -87,6 +116,9 @@ body {
     animation: none !important;
   }
   .animate-subtle-breathe {
+    animation: none !important;
+  }
+  .animate-upload-breathe {
     animation: none !important;
   }
 }
